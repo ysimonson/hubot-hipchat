@@ -26,6 +26,7 @@ fs = require "fs"
 xmpp = require 'node-xmpp-client'
 xmpp.Element = xmpp.ltx.Element
 xmpp.JID = require('node-xmpp-core').JID
+Hipchatter = require("hipchatter")
 
 # Parse and cache the node package.json file when this module is loaded
 pkg = do ->
@@ -71,7 +72,38 @@ module.exports = class Connector extends EventEmitter
     # to the MUC service.
     @mucDomain = "conf.#{if @xmppDomain then @xmppDomain else 'hipchat.com'}"
 
+    @apiClient = new Hipchatter(process.env.HIPCHATTER_USER_TOKEN)
+    @jabberIdRoomMapping = {}
+    @refreshAllRoomData()
+
     @onError @disconnect
+
+  refreshAllRoomData: () ->
+    @apiClient.rooms((err, rooms) =>
+      if err
+        @logger.error err
+      else
+        @jabberIdRoomMapping = {}
+        sleepTime = 3500
+
+        # Sleep in-between calls to avoid hitting the API limit
+        for room in rooms
+          cb = (roomId) =>
+            setTimeout(() =>
+              @refreshRoomData(roomId)
+            , sleepTime)
+
+          cb(room.id)
+          sleepTime += 3500
+    )
+
+  refreshRoomData: (roomId) ->
+    @apiClient.get_room(roomId, (err, roomDetails) =>
+      if err
+        @logger.error err
+      else
+        @jabberIdRoomMapping[roomDetails.xmpp_jid] = roomDetails.id
+    )
 
   # Connects the connector to HipChat and sets the XMPP event listeners.
   connect: ->
@@ -213,6 +245,29 @@ module.exports = class Connector extends EventEmitter
   #    - Private message to a user: `????_????@chat.hipchat.com`
   # - `message`: Message to be sent to the room
   message: (targetJid, message) ->
+    # Hack to check for html in the message, and if so, use an alternate means
+    if /<\w+>/.test(message)
+      @htmlMessage(targetJid, message)
+    else
+      @plainMessage(targetJid, message)
+
+  htmlMessage: (targetJid, message) ->
+    targetId = @jabberIdRoomMapping[targetJid]
+
+    # Don't have a room ID yet - just send a normal message
+    if targetId == undefined
+      return @plainMessage(targetJid, message)
+
+    opts = {
+      message: message,
+      token: process.env.HIPCHATTER_USER_TOKEN,
+    }
+
+    @apiClient.notify(targetId, opts, (err) =>
+      @logger.error err
+    )
+
+  plainMessage: (targetJid, message) ->
     parsedJid = new xmpp.JID targetJid
 
     if parsedJid.domain is @mucDomain
@@ -228,6 +283,7 @@ module.exports = class Connector extends EventEmitter
     # we should make sure that the message is properly escaped
     # based on http://unix.stackexchange.com/questions/111899/how-to-strip-color-codes-out-of-stdout-and-pipe-to-file-and-stdout
     message = message.replace(/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]/g, "")  # remove bash color codes
+    message = message.replace(/&/g, "&amp;")                                  # Replacing &
     @logger.debug 'building message'
     @logger.debug message
     packet.c("body").t(message)
