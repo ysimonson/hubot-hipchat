@@ -246,7 +246,7 @@ module.exports = class Connector extends EventEmitter
   # - `message`: Message to be sent to the room
   message: (targetJid, message) ->
     # Hack to check for html in the message, and if so, use an alternate means
-    if /<\w+>/.test(message)
+    if /<\w+>/.test(message) and /<\/\w+>/.test(message)
       @htmlMessage(targetJid, message)
     else
       @plainMessage(targetJid, message)
